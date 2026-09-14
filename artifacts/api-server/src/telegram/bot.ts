@@ -619,6 +619,14 @@ export class TelegramBotService {
       await this.askCommitMessage(session);
       return;
     }
+    if (data === "zip:preview" && session.stage === "awaiting_confirmation") {
+      await this.previewUpload(session);
+      return;
+    }
+    if (data === "zip:back" && session.stage === "awaiting_confirmation") {
+      await this.showConfirmation(session);
+      return;
+    }
     if (data === "zip:confirm" && session.stage === "awaiting_confirmation") {
       session.stage = "uploading";
       session.progressMessageId = message.message_id;
@@ -1238,6 +1246,7 @@ export class TelegramBotService {
       session.chatId,
       message,
       keyboard([
+        [{ text: "Preview GitHub changes", callback_data: "zip:preview" }],
         [{ text: "Upload", callback_data: "zip:confirm" }],
           [
             { text: "Change repository", callback_data: "zip:edit:repo" },
@@ -1355,6 +1364,66 @@ export class TelegramBotService {
     }
   }
 
+  private async previewUpload(session: Session): Promise<void> {
+    try {
+      if (!session.repository || !session.branch || !session.destination) {
+        throw new Error("Upload session is incomplete.");
+      }
+      const { owner, name } = splitRepository(session.repository);
+      const github = await this.githubClient(session.databaseUserId);
+      const parentCommit = await github.getBranchCommit(owner, name, session.branch);
+      const baseTree = await github.getCommitTree(owner, name, parentCommit);
+      const existingPaths = await github.getExistingPaths(owner, name, baseTree);
+      const destinationPrefix =
+        session.destination === "/" ? "" : `${session.destination.replace(/^\/+|\/+$/g, "")}/`;
+      const incomingPaths = new Set(
+        session.summary.files.map((file) => joinGithubPath(session.destination ?? "/", file.relativePath)),
+      );
+      const existingInDestination = [...existingPaths].filter(
+        (existingPath) => destinationPrefix === "" || existingPath.startsWith(destinationPrefix),
+      );
+      const created = [...incomingPaths].filter((filePath) => !existingPaths.has(filePath));
+      const updated = [...incomingPaths].filter((filePath) => existingPaths.has(filePath));
+      const deleted =
+        session.syncMode === "replace"
+          ? existingInDestination.filter((filePath) => !incomingPaths.has(filePath))
+          : [];
+      const sample = (label: string, paths: string[]) =>
+        paths.length
+          ? `\n<b>${label} examples:</b>\n<pre>${paths.slice(0, 5).map(escapeHtml).join("\n")}</pre>`
+          : "";
+
+      await this.api.sendMessage(
+        session.chatId,
+        [
+          "<b>GitHub change preview</b>",
+          "",
+          `<b>Repository:</b> ${escapeHtml(session.repository)}`,
+          `<b>Branch:</b> ${escapeHtml(session.branch)}`,
+          `<b>Mode:</b> ${session.syncMode === "replace" ? "exact sync" : "merge (add/update only)"}`,
+          "",
+          `✅ New files: ${created.length}`,
+          `♻️ Updated files: ${updated.length}`,
+          `🗑 Files to remove: ${deleted.length}`,
+          sample("New", created),
+          sample("Updated", updated),
+          sample("Removed", deleted),
+          "",
+          deleted.length
+            ? "Review the removed-file count carefully. Upload creates one commit only after you tap Upload."
+            : "No files will be removed. Upload creates one commit only after you tap Upload.",
+        ].join("\n"),
+        keyboard([
+          [{ text: "Upload now", callback_data: "zip:confirm" }],
+          [{ text: "Back to upload details", callback_data: "zip:back" }],
+          [{ text: "Cancel", callback_data: "zip:cancel" }],
+        ]),
+      );
+    } catch (error) {
+      await this.api.sendMessage(session.chatId, this.userFacingError(error));
+    }
+  }
+
   private async cancel(userId: number, chatId: number): Promise<void> {
     if (this.tokenSessions.delete(userId)) {
       await this.api.sendMessage(chatId, "GitHub token setup cancelled.");
@@ -1409,6 +1478,7 @@ export class TelegramBotService {
         "/cancel — cancel the current upload",
         "/help — show this help",
         "",
+         "Before committing, use Preview GitHub changes to see new, updated, and removed files.",
         "ZIP entries are extracted without execution, checked for traversal and symlink attacks, and committed in one Git commit with their exact relative paths.",
       ].join("\n"),
       keyboard([
@@ -1481,6 +1551,7 @@ export class TelegramBotService {
         `<b>Branch:</b> ${escapeHtml(job.branch)}`,
         `<b>Status:</b> ${escapeHtml(status)}`,
         `<b>Files:</b> ${job.totalFiles}`,
+         `<b>Created:</b> ${job.createdFiles}  <b>Updated:</b> ${job.updatedFiles}  <b>Removed:</b> ${job.deletedFiles ?? 0}`,
         job.commitSha ? `<b>Commit:</b> <code>${escapeHtml(job.commitSha.slice(0, 12))}</code>` : "",
         job.error ? `<b>Error:</b> ${escapeHtml(job.error)}` : "",
       ].filter(Boolean).join("\n"),
