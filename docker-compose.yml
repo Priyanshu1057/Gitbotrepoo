@@ -1,0 +1,14 @@
+services:
+  github-upload-telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: github-upload-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    ports:
+      - "8080:8080"
